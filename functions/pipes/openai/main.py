@@ -10,8 +10,7 @@ import os
 import requests
 import time
 import re
-import json
-from typing import List, Union, AsyncGenerator, Iterator, Optional, Dict
+from typing import List, Union, AsyncGenerator, Iterator, Optional, Dict, Awaitable, Callable
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import pop_system_message
 from openai import AsyncOpenAI
@@ -21,16 +20,22 @@ class Pipe:
     class Valves(BaseModel):
         OPENAI_API_KEY: str = Field(default="")
         OPENAI_ENABLE_WEB_SEARCH: bool = Field(default=False)
+        OPENAI_ENABLE_IMAGE_GENERATION: bool = Field(default=False)
 
     def __init__(self):
         self.type = "manifold"
         self.id = "openai"
         self.name = ""  # openai/"
         self.valves = self.Valves(
-            **{"OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""), "OPENAI_ENABLE_WEB_SEARCH": os.getenv("OPENAI_ENABLE_WEB_SEARCH", False)}
+            **{
+                "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
+                "OPENAI_ENABLE_WEB_SEARCH": os.getenv("OPENAI_ENABLE_WEB_SEARCH", False),
+                "OPENAI_ENABLE_IMAGE_GENERATION": os.getenv("OPENAI_ENABLE_IMAGE_GENERATION", False),
+            }
         )
         self.MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB per image
         self.client: AsyncOpenAI = AsyncOpenAI(api_key=self.valves.OPENAI_API_KEY)
+        self.emitter: Callable[[dict], Awaitable[None]] | None = None
 
         # Model cache
         self._model_cache: Optional[List[Dict[str, str]]] = None
@@ -85,6 +90,10 @@ class Pipe:
     async def pipes(self) -> List[dict]:
         return await self.get_openai_models()
 
+    async def emit_status(self, message: str = "", done: bool = False, hidden: bool = False):
+        if self.emitter:
+            await self.emitter({"type": "status", "data": {"description": message, "done": done, "hidden": hidden}})
+
     def process_image(self, image_data):
         """Process image data with size validation."""
         if image_data["image_url"]["url"].startswith("data:image"):
@@ -111,7 +120,8 @@ class Pipe:
                 "source": {"type": "url", "url": url},
             }
 
-    async def pipe(self, body: dict) -> Union[str, AsyncGenerator, Iterator]:
+    async def pipe(self, body: dict, __event_emitter__: Callable[[dict], Awaitable[None]]) -> Union[str, AsyncGenerator, Iterator]:
+        self.emitter = __event_emitter__
         system_message, messages = pop_system_message(body["messages"])
 
         processed_messages = []
@@ -143,22 +153,12 @@ class Pipe:
             "max_output_tokens": body.get("max_tokens", 4096),
             # "temperature": body.get("temperature", 0.8),
             "instructions": str(system_message) if system_message else "",
-            "tools": (
-                [
-                    {
-                        "type": "web_search",
-                        "user_location": {
-                            "type": "approximate",
-                            "country": "US",
-                            "city": "San Ramon",
-                            "region": "CA",
-                        },
-                    }
-                ]
-                if self.valves.OPENAI_ENABLE_WEB_SEARCH
-                else []
-            ),
+            "tools": [],
         }
+        if self.valves.OPENAI_ENABLE_WEB_SEARCH:
+            payload["tools"].append({"type": "web_search", "user_location": {"type": "approximate", "country": "US", "city": "San Ramon", "region": "CA"}})
+        if self.valves.OPENAI_ENABLE_IMAGE_GENERATION:
+            payload["tools"].append({"type": "image_generation"})
         try:
             if body.get("stream", False):
                 return self.stream_response(payload)
@@ -177,9 +177,18 @@ class Pipe:
                     if event.type == "response.output_text.delta":
                         yield event.delta
                     elif event.type == "response.web_search_call.in_progress":
-                        yield "<think>performing web search..."
+                        await self.emit_status("Performing web search...")
                     elif event.type == "response.web_search_call.completed":
-                        yield "</think>"
+                        await self.emit_status("Web search completed", hidden=True)
+                    elif event.type == "response.image_generation_call.in_progress":
+                        await self.emit_status("Generating image...")
+                    elif event.type == "response.image_generation_call.partial_image":
+                        idx = event.partial_image_index
+                        yield f"![image_{idx}](data:image/png;base64,{event.partial_image_b64})"
+                    elif event.type == "response.completed":
+                        await self.emit_status("Response completed", done=True, hidden=True)
+                    elif event.type == "response.error":
+                        await self.emit_status(f"Error: {event.error_message}")
         except Exception as e:
             print(f"General error in stream_response method: {e}")
             yield f"Error: {e}"
