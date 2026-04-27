@@ -137,9 +137,10 @@ class Pipe:
                         processed_image = self.process_image(item)
                         processed_content.append(processed_image)
 
-                        # Track total size for base64 images
-                        image_size = len(processed_image["image_url"]) * 3 / 4
-                        total_image_size += image_size
+                        # Track total size for base64 images (URL images are validated in process_image)
+                        if "image_url" in processed_image:
+                            image_size = len(processed_image["image_url"]) * 3 / 4
+                            total_image_size += image_size
                         if total_image_size > 100 * 1024 * 1024:  # 100MB total limit
                             raise ValueError("Total size of images exceeds 100 MB limit")
             else:
