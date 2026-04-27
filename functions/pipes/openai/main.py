@@ -9,7 +9,6 @@ license: MIT
 import os
 import requests
 import time
-import re
 from typing import List, Union, AsyncGenerator, Iterator, Optional, Dict, Awaitable, Callable
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import pop_system_message
@@ -68,7 +67,7 @@ class Pipe:
 
         try:
             openai_models = await self.get_client().models.list()
-            models = [{"id": model.id, "name": model.id} for model in openai_models.data if re.search(r"gpt-(4\.1|5\.1)", model.id)]
+            models = [{"id": model.id, "name": model.id} for model in openai_models.data]
             models.sort(key=lambda x: x["name"])
 
             # Update cache
